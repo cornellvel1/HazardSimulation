@@ -151,6 +151,10 @@ public class UniversalHazardController : MonoBehaviour
     {
         Debug.Log($"Resetting any gameObjects altered by the hazard");
 
+        // A full scenario reset is intentionally different from extinguishing:
+        // all direct and radiated TIC warmth clears immediately.
+        ThermalRadiationManager.ResetAllTemperatures();
+
         // Reset colors of marked/spread gameobjects
         foreach (var pair in originalColors)
         {
@@ -183,7 +187,9 @@ public class UniversalHazardController : MonoBehaviour
                 // track the heat on the object
                 if (pair.Key.TryGetComponent<HazardTemperature>(out HazardTemperature temp))
                 {
-                    temp.ResetTemperature(); // Snaps thermal view to blue instantly
+                    // A player extinguishing one object leaves residual surface
+                    // warmth. resetAffectedObjects remains the full scenario reset.
+                    temp.Extinguish();
                 }
             }
         }

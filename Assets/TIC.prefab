@@ -582,6 +582,7 @@ GameObject:
   - component: {fileID: 1460512090593219392}
   - component: {fileID: 1769118172225271628}
   - component: {fileID: 1124277250282458195}
+  - component: {fileID: 7196854429134279811}
   m_Layer: 10
   m_Name: Camera
   m_TagString: Untagged
@@ -613,8 +614,8 @@ Camera:
   m_GameObject: {fileID: 5905383520558288118}
   m_Enabled: 1
   serializedVersion: 2
-  m_ClearFlags: 1
-  m_BackGroundColor: {r: 0.19215687, g: 0.3019608, b: 0.4745098, a: 0}
+  m_ClearFlags: 2
+  m_BackGroundColor: {r: 0, g: 0, b: 0, a: 1}
   m_projectionMatrixMode: 1
   m_GateFitMode: 2
   m_FOVAxisMode: 0
@@ -707,6 +708,23 @@ MonoBehaviour:
     m_MipBias: 0
     m_VarianceClampScale: 0.9
     m_ContrastAdaptiveSharpening: 0
+--- !u!114 &7196854429134279811
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 5905383520558288118}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 18d5585c6bb34cf8a59f6f965cc88c4e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  maximumDistance: 50
+  measurementLayers:
+    serializedVersion: 2
+    m_Bits: 4294966783
+  refreshInterval: 0.1
 --- !u!1 &8851718789047839126
 GameObject:
   m_ObjectHideFlags: 0

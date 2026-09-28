@@ -188,8 +188,10 @@ public class NetworkedFireState : RealtimeComponent<FireStateModel>
         _fireProfileController = GetComponent<FireProfileController>();
 
         // A scene-configured fire must not run its local Ignis Start() ignition
-        // before the shared room has two players. Otherwise each client can create
-        // a different autonomous fire before Normcore has selected an authority.
+        // before the shared room has its required quorum. The global
+        // NetworkedFireSettings test checkbox can intentionally relax that gate.
+        // Otherwise each client can create a different autonomous fire before
+        // Normcore has selected an authority.
         FlameEngine flameEngine = FlameEngine.instance;
         _delayConfiguredStartUntilQuorum =
             _flammableObject.setThisOnFireOnStart ||
@@ -451,7 +453,7 @@ public class NetworkedFireState : RealtimeComponent<FireStateModel>
 
         TrySchedulePendingQuorumReset();
 
-        // Keep Start Fire On Play objects dormant until the first two-player
+        // Keep Start Fire On Play objects dormant until the first effective
         // quorum schedules and reaches its shared reset timestamp.
         if (_delayConfiguredStartUntilQuorum && !_configuredStartReleased)
         {
@@ -770,8 +772,9 @@ public class NetworkedFireState : RealtimeComponent<FireStateModel>
 
         RefreshMultiplayerQuorum();
 
-        // Fires can be enabled after both players already exist. They still need
-        // the same authoritative start barrier as fires present during the join.
+        // Fires can be enabled after the effective quorum already exists. They
+        // still need the same authoritative start barrier as fires present
+        // during the join.
         if (newlyRegistered && _hasMultiplayerQuorum &&
             _delayConfiguredStartUntilQuorum && !_configuredStartReleased)
         {
@@ -821,7 +824,12 @@ public class NetworkedFireState : RealtimeComponent<FireStateModel>
             Debug.Log($"[NetworkedFireState] Multiplayer fire quorum: {playerCount}/{MinimumPlayersToStartConfiguredFires} player avatars ready.");
         }
 
-        SetMultiplayerQuorum(playerCount >= MinimumPlayersToStartConfiguredFires);
+        bool singleUserTestingEnabled =
+            NetworkedFireSettings.Instance != null &&
+            NetworkedFireSettings.Instance.AllowSingleUserFireStartForTesting;
+        SetMultiplayerQuorum(
+            singleUserTestingEnabled ||
+            playerCount >= MinimumPlayersToStartConfiguredFires);
     }
 
     private static void SetMultiplayerQuorum(bool hasQuorum)
@@ -865,7 +873,7 @@ public class NetworkedFireState : RealtimeComponent<FireStateModel>
         // Dormant and already-finished fires remain dormant. A partially
         // extinguished but still-burning fire restarts from full strength. The
         // exception is a configured start fire deliberately held dormant for the
-        // first two-player quorum: that fire starts now.
+        // first effective quorum: that fire starts now.
         if (!shouldStartConfiguredFire &&
             (!model.isBurning || model.isExtinguished || model.isBurnedOut))
         {
@@ -920,6 +928,8 @@ public class NetworkedFireState : RealtimeComponent<FireStateModel>
 
         _flammableObject.ResetObj();
         _flammableObject.ResetMaterialFromIgnis();
+        if (TryGetComponent<HazardTemperature>(out HazardTemperature resetTemperature))
+            resetTemperature.ResetTemperature();
         if (_fireProfileController != null)
             _fireProfileController.ResetForNetworkRestart();
         if (shouldBurn)
@@ -2182,7 +2192,9 @@ public class NetworkedFireState : RealtimeComponent<FireStateModel>
         }
         else if (TryGetComponent<HazardTemperature>(out HazardTemperature existing))
         {
-            existing.ResetTemperature();
+            // Extinguishing removes the heat source but preserves stored surface
+            // warmth. Only a synchronized scenario reset should snap to ambient.
+            existing.Extinguish();
         }
     }
 
@@ -2201,6 +2213,6 @@ public class NetworkedFireState : RealtimeComponent<FireStateModel>
             _hazardController.resetSingleObject(gameObject);
 
         if (TryGetComponent<HazardTemperature>(out HazardTemperature temp))
-            temp.ResetTemperature();
+            temp.Extinguish();
     }
 }

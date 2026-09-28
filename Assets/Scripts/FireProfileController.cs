@@ -295,10 +295,10 @@ public class FireProfileController : MonoBehaviour
                 // Takes a while to catch on fire, holds a fire for a while, mid-level difficulty to extinguish
                 // High ignition time delays how long it takes for the object to catch fire
                 flammableObject.ignitionTime = 15f;
-                flammableObject.burnOutStart_s = 120f;
+                flammableObject.burnOutStart_s = 9999f;
                 // Mid-level difficulty to fully extinguish
                 flammableObject.fullExtinguishToughness = 0.5f;
-                flammableObject.isReignitable = FlammableObject.ReIgnitable.Always;
+                flammableObject.isReignitable = FlammableObject.ReIgnitable.No;
                 flammableObject.maxSpread = 20f; // cap spread to a contained 20 m area
                 flammableObject.backSpreadCoolDown_s = 5f; // some amount of time before it tries to reignite/can be reignited
                 flammableObject.fireCrawlSpeed = 0.05f;

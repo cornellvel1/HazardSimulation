@@ -1,264 +1,232 @@
-using UnityEngine;
 using Ignis;
+using UnityEngine;
 
-public class HazardTemperature : MonoBehaviour
+[DisallowMultipleComponent]
+public sealed class HazardTemperature : MonoBehaviour
 {
-    private FireProfileController fireController;
-    private FlammableObject flammableObject;
+    [Header("Thermal State")]
+    [Tooltip("Current normalized apparent surface heat shown by the TIC (0 = ambient, 1 = hottest).")]
+    [Range(0f, 1f)] public float temperature;
 
-    [Header("Live Thermal State")]
-    [Tooltip("Normalized temperature sent to the thermal materials: 0 is cold and 1 is fully hot.")]
-    [Range(0f, 1f)] public float temperature = 0.0f;
+    [Tooltip("Normalized heat gained per second while burning or receiving radiant heat.")]
+    [Min(0f)] public float heatUpSpeed = 0.22f;
 
-    private Renderer[] thermalRenderers;
-    private MaterialPropertyBlock propBlock;
-    private ThermalHeatEffects heatEffects;
+    [Tooltip("Cooling response. The existing value of 0.5 cools a full-hot surface over roughly 22 seconds.")]
+    [Min(0f)] public float coolDownSpeed = 0.5f;
 
     public float NormalizedTemperature => temperature;
-
-    [HideInInspector] public float heatUpSpeed = 0.5f; // Retained for existing serialized scenes.
-    [Tooltip("How quickly the displayed temperature falls when the object cools.")]
-    public float coolDownSpeed = 0.5f; // Track dynamic cooling as the user sprays
-
-    [Header("Temperature Response")]
-    [Tooltip("Delay after ignition before the thermal surface begins heating.")]
-    [SerializeField, Min(0f)] private float heatUpDelay = 0.5f;
-    [Tooltip("Seconds for the thermal display to move from cold to fully hot.")]
-    [SerializeField, Min(0.1f)] private float heatUpDuration = 10f;
-
-    [Header("Heat Spread")]
-    [Tooltip("Seconds for localized heat to spread across the object.")]
-    [SerializeField, Min(0.1f)] private float heatSpreadDuration = 8f;
-    [Tooltip("Final heat-radius multiplier relative to the renderer bounds.")]
-    [SerializeField, Min(1f)] private float fullHeatRadiusMultiplier = 12f;
-
-    private Vector3 heatOriginWorld;
-    private Vector3 heatOriginLocal;
-    private float maximumHeatDistance = 1f;
-    private float heatSpreadProgress;
-    private float timeSinceIgnition;
-    private bool wasOnFire;
-    private bool isIgnited;
+    public bool IsDirectHeatSource => directHeatSource;
+    // Heated objects re-radiate a reduced fraction of their stored heat. The
+    // attenuation prevents a chain of warm surfaces from amplifying itself.
+    public float RadiantHeat => directHeatSource ? temperature : temperature * 0.25f;
+    public float EstimatedCelsius
+    {
+        get
+        {
+            float maximum = fireProfile != null && fireProfile.maxTemperature > 0
+                ? fireProfile.maxTemperature
+                : 650f;
+            float apparentSurfaceMaximum = Mathf.Clamp(maximum, 350f, 520f);
+            return Mathf.Lerp(21f, apparentSurfaceMaximum, Mathf.Clamp01(temperature));
+        }
+    }
 
     private static readonly int TemperatureId = Shader.PropertyToID("_Temperature");
-    private static readonly int HeatOriginId = Shader.PropertyToID("_HeatOrigin");
-    private static readonly int HeatRadiusId = Shader.PropertyToID("_HeatRadius");
-    private static readonly int LocalizedHeatId = Shader.PropertyToID("_UseLocalizedHeat");
+    private static readonly int TemperatureCelsiusId = Shader.PropertyToID("_TemperatureCelsius");
+    private const float CoolingRateScale = 0.09f;
 
-    void Start()
+    private MaterialPropertyBlock propertyBlock;
+    private FireProfileController fireProfile;
+    private FlammableObject flammableObject;
+    private Renderer[] renderers;
+    private bool externallyIgnited;
+    private bool directHeatSource;
+    private float radiantTarget;
+    private Vector3 radiantHeatOrigin;
+    private bool hasRadiantHeatOrigin;
+    private Bounds thermalBounds;
+    private bool hasThermalBounds;
+    private Matrix4x4 cachedLocalToWorld;
+
+    private bool IsBurning => externallyIgnited || (flammableObject != null && flammableObject.onFire);
+
+    private void Awake()
     {
-        fireController = GetComponent<FireProfileController>();
+        propertyBlock = new MaterialPropertyBlock();
+        CacheDependencies();
+        ApplyTemperature();
+    }
+
+    private void OnEnable()
+    {
+        CacheDependencies();
+        ThermalRadiationManager.Register(this);
+        ApplyTemperature();
+    }
+
+    private void OnDisable()
+    {
+        ThermalRadiationManager.Unregister(this);
+    }
+
+    private void Update()
+    {
+        bool burning = IsBurning;
+        if (burning)
+            directHeatSource = true;
+
+        float directTarget = burning ? GetBurningTarget() : 0f;
+        float target = Mathf.Max(directTarget, radiantTarget);
+        float speed = target > temperature ? heatUpSpeed : coolDownSpeed * CoolingRateScale;
+        temperature = Mathf.MoveTowards(temperature, target, Mathf.Max(0f, speed) * Time.deltaTime);
+
+        if (!burning && temperature <= 0.001f)
+        {
+            directHeatSource = false;
+            if (radiantTarget <= 0.001f)
+                hasRadiantHeatOrigin = false;
+        }
+
+        ApplyTemperature();
+    }
+
+    private void CacheDependencies()
+    {
+        fireProfile = GetComponent<FireProfileController>();
         flammableObject = GetComponent<FlammableObject>();
-        thermalRenderers = GetComponentsInChildren<Renderer>(true);
-        propBlock = new MaterialPropertyBlock();
-        heatOriginWorld = transform.position;
-        heatOriginLocal = Vector3.zero;
-        UpdateMaximumHeatDistance();
-
-        heatEffects = GetComponent<ThermalHeatEffects>();
-        if (heatEffects == null)
-            heatEffects = gameObject.AddComponent<ThermalHeatEffects>();
+        renderers = GetComponentsInChildren<Renderer>(true);
+        CacheThermalBounds();
     }
 
-    void Update()
+    private void CacheThermalBounds()
     {
-        UpdateHeatSpread();
+        hasThermalBounds = false;
+        thermalBounds = new Bounds(transform.position, Vector3.zero);
 
-        float targetTemperature = temperature;
-        if (fireController != null)
+        if (renderers != null)
         {
-            // Each profile has a different maximum. A fully burning fire should
-            // always reach the hottest TIC color, regardless of its profile.
-            float maximum = Mathf.Max(1f, fireController.maxTemperature);
-            targetTemperature = Mathf.Clamp01(fireController.currentTemperature / maximum);
-        }
-        else if (flammableObject != null)
-        {
-            targetTemperature = GetFlammableTemperature();
-        }
-
-        // NetworkedFireState replicates an explicit heat-visual flag. Preserve that
-        // contract even on clients where the local fire simulation is only a puppet.
-        if (isIgnited)
-            targetTemperature = Mathf.Max(targetTemperature, 1f);
-
-        UpdateTemperature(targetTemperature);
-        ApplyTemperatureToRenderer();
-    }
-
-    private void UpdateTemperature(float targetTemperature)
-    {
-        targetTemperature = Mathf.Clamp01(targetTemperature);
-
-        if (targetTemperature > temperature)
-        {
-            bool canHeatUp = isIgnited || flammableObject == null || flammableObject.onFire;
-            if (!canHeatUp || timeSinceIgnition < heatUpDelay)
-                return;
-
-            float heatUpRate = 1f / Mathf.Max(0.1f, heatUpDuration);
-            temperature = Mathf.MoveTowards(
-                temperature,
-                targetTemperature,
-                heatUpRate * Time.deltaTime);
-            return;
-        }
-
-        temperature = Mathf.MoveTowards(
-            temperature,
-            targetTemperature,
-            Mathf.Max(0f, coolDownSpeed) * Time.deltaTime);
-    }
-
-    private float GetFlammableTemperature()
-    {
-        if (!flammableObject.onFire)
-            return 0f;
-
-        float brightnessTime = Mathf.Max(0.1f, flammableObject.achieveMaxBrightness_s);
-        float ignitionHeat = Mathf.Lerp(0.72f, 1f,
-            Mathf.Clamp01(flammableObject.onFireTimer / brightnessTime));
-
-        if (flammableObject.onFireTimer <= flammableObject.burnOutStart_s)
-            return ignitionHeat;
-
-        float burnoutLength = Mathf.Max(0.1f, flammableObject.burnOutLength_s);
-        float burnoutProgress = Mathf.Clamp01(
-            (flammableObject.onFireTimer - flammableObject.burnOutStart_s) / burnoutLength);
-        return Mathf.Lerp(ignitionHeat, 0.35f, burnoutProgress);
-    }
-
-    private void UpdateHeatSpread()
-    {
-        bool isOnFire = isIgnited || (flammableObject != null && flammableObject.onFire);
-
-        if (isOnFire && !wasOnFire)
-        {
-            heatOriginWorld = flammableObject != null
-                ? flammableObject.GetFireOrigin()
-                : transform.position;
-            heatOriginLocal = transform.InverseTransformPoint(heatOriginWorld);
-            heatSpreadProgress = 0f;
-            timeSinceIgnition = 0f;
-            UpdateMaximumHeatDistance();
-        }
-
-        if (flammableObject != null && (isOnFire || heatSpreadProgress > 0f))
-            heatOriginWorld = transform.TransformPoint(heatOriginLocal);
-
-        if (isOnFire)
-        {
-            if (flammableObject != null && flammableObject.onFire)
+            foreach (Renderer targetRenderer in renderers)
             {
-                // NetworkedFireState drives onFireTimer from synchronized room
-                // time on puppets. Deriving TIC progression from it prevents each
-                // headset from starting a separate local heat clock on arrival.
-                timeSinceIgnition = Mathf.Max(0f, flammableObject.onFireTimer);
-                heatSpreadProgress = Mathf.Clamp01(
-                    timeSinceIgnition / Mathf.Max(0.1f, heatSpreadDuration));
-                heatOriginWorld = flammableObject.GetFireOrigin();
-                heatOriginLocal = transform.InverseTransformPoint(heatOriginWorld);
-            }
-            else
-            {
-                timeSinceIgnition += Time.deltaTime;
-                heatSpreadProgress = Mathf.MoveTowards(
-                    heatSpreadProgress,
-                    1f,
-                    Time.deltaTime / Mathf.Max(0.1f, heatSpreadDuration));
-            }
-        }
-
-        wasOnFire = isOnFire;
-    }
-
-    private void UpdateMaximumHeatDistance()
-    {
-        bool foundBounds = false;
-        Bounds combinedBounds = new Bounds(transform.position, Vector3.one);
-
-        if (thermalRenderers != null)
-        {
-            foreach (Renderer thermalRenderer in thermalRenderers)
-            {
-                if (thermalRenderer == null || thermalRenderer is ParticleSystemRenderer)
+                if (targetRenderer == null || targetRenderer is ParticleSystemRenderer)
                     continue;
 
-                if (!foundBounds)
+                if (!hasThermalBounds)
                 {
-                    combinedBounds = thermalRenderer.bounds;
-                    foundBounds = true;
+                    thermalBounds = targetRenderer.bounds;
+                    hasThermalBounds = true;
                 }
                 else
                 {
-                    combinedBounds.Encapsulate(thermalRenderer.bounds);
+                    thermalBounds.Encapsulate(targetRenderer.bounds);
                 }
             }
         }
 
-        maximumHeatDistance = foundBounds
-            ? Vector3.Distance(heatOriginWorld, combinedBounds.center) + combinedBounds.extents.magnitude
-            : 1f;
-        maximumHeatDistance = Mathf.Max(0.1f, maximumHeatDistance);
+        cachedLocalToWorld = transform.localToWorldMatrix;
     }
 
-    private void ApplyTemperatureToRenderer()
+    private float GetBurningTarget()
     {
-        if (thermalRenderers == null || thermalRenderers.Length == 0)
+        // Ignite() is also the replicated heat-visual contract. It must produce
+        // heat even when a local FireProfileController is only a network puppet.
+        if (externallyIgnited)
+            return 1f;
+
+        if (fireProfile != null && fireProfile.maxTemperature > 0)
+            return Mathf.Clamp01(fireProfile.currentTemperature / fireProfile.maxTemperature);
+
+        if (flammableObject != null && flammableObject.onFire)
+        {
+            float warmUpTime = Mathf.Max(0.1f, flammableObject.achieveMaxBrightness_s);
+            return Mathf.Lerp(0.65f, 1f, Mathf.Clamp01(flammableObject.onFireTimer / warmUpTime));
+        }
+
+        return 1f;
+    }
+
+    private void ApplyTemperature()
+    {
+        if (renderers == null)
             return;
 
-        float growth = Mathf.SmoothStep(0f, 1f, heatSpreadProgress);
-        float initialRadius = Mathf.Max(0.12f, maximumHeatDistance * 0.05f);
-        float fullRadius = maximumHeatDistance * Mathf.Max(1f, fullHeatRadiusMultiplier);
-        float heatRadius = Mathf.Lerp(initialRadius, fullRadius, growth);
-        float useLocalizedHeat = flammableObject != null ? 1f : 0f;
-
-        foreach (Renderer thermalRenderer in thermalRenderers)
+        propertyBlock ??= new MaterialPropertyBlock();
+        foreach (Renderer targetRenderer in renderers)
         {
-            if (thermalRenderer == null)
+            if (targetRenderer == null || targetRenderer is ParticleSystemRenderer)
                 continue;
 
-            thermalRenderer.GetPropertyBlock(propBlock);
-            propBlock.SetFloat(TemperatureId, temperature);
-            propBlock.SetVector(HeatOriginId, heatOriginWorld);
-            propBlock.SetFloat(HeatRadiusId, heatRadius);
-            propBlock.SetFloat(LocalizedHeatId, useLocalizedHeat);
-            thermalRenderer.SetPropertyBlock(propBlock);
+            targetRenderer.GetPropertyBlock(propertyBlock);
+            propertyBlock.SetFloat(TemperatureId, Mathf.Clamp01(temperature));
+            propertyBlock.SetFloat(TemperatureCelsiusId, EstimatedCelsius);
+            targetRenderer.SetPropertyBlock(propertyBlock);
         }
     }
 
-    // Retained for the Normcore heat-visual replication contract.
+    public Vector3 GetRadiationOrigin()
+    {
+        if (directHeatSource && flammableObject != null)
+            return flammableObject.GetFireOrigin();
+        if (hasRadiantHeatOrigin)
+            return radiantHeatOrigin;
+        return GetThermalCenter();
+    }
+
+    public Vector3 GetClosestThermalPoint(Vector3 worldPoint)
+    {
+        RefreshThermalBoundsIfMoved();
+        return hasThermalBounds ? thermalBounds.ClosestPoint(worldPoint) : transform.position;
+    }
+
+    public void SetRadiantTarget(float normalizedHeat)
+    {
+        radiantTarget = Mathf.Clamp01(normalizedHeat);
+    }
+
+    public void AccumulateRadiantTarget(float normalizedHeat, Vector3 exposurePoint)
+    {
+        float candidate = Mathf.Clamp01(normalizedHeat);
+        if (candidate <= radiantTarget)
+            return;
+
+        radiantTarget = candidate;
+        radiantHeatOrigin = exposurePoint;
+        hasRadiantHeatOrigin = true;
+    }
+
     public void Ignite()
     {
-        isIgnited = true;
+        externallyIgnited = true;
+        directHeatSource = true;
     }
 
     public void Extinguish()
     {
-        isIgnited = false;
+        externallyIgnited = false;
     }
 
-    // Call this when the simulation is ready for a full reset
     public void ResetTemperature()
     {
-        isIgnited = false;
-        temperature = 0.0f;
-        heatOriginWorld = transform.position;
-        heatOriginLocal = Vector3.zero;
-        heatSpreadProgress = 0f;
-        timeSinceIgnition = 0f;
-        wasOnFire = false;
+        externallyIgnited = false;
+        directHeatSource = false;
+        radiantTarget = 0f;
+        hasRadiantHeatOrigin = false;
+        temperature = 0f;
 
-        // Force an immediate update to the renderer so it snaps to blue instantly
-        if (thermalRenderers == null || thermalRenderers.Length == 0)
-            thermalRenderers = GetComponentsInChildren<Renderer>(true);
-        if (propBlock == null) propBlock = new MaterialPropertyBlock();
+        if (renderers == null)
+            CacheDependencies();
 
-        UpdateMaximumHeatDistance();
-        ApplyTemperatureToRenderer();
+        ApplyTemperature();
+    }
 
-        if (heatEffects == null)
-            heatEffects = GetComponent<ThermalHeatEffects>();
-        heatEffects?.ResetLingeringHeat();
+    private Vector3 GetThermalCenter()
+    {
+        RefreshThermalBoundsIfMoved();
+        return hasThermalBounds ? thermalBounds.center : transform.position;
+    }
+
+    private void RefreshThermalBoundsIfMoved()
+    {
+        if (!hasThermalBounds || cachedLocalToWorld != transform.localToWorldMatrix)
+            CacheThermalBounds();
     }
 }
